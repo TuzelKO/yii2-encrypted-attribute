@@ -118,4 +118,75 @@ class CiphersTest extends TestCase
         $this->expectExceptionMessage('authentication tag mismatch');
         (new XChaCha20Poly1305Cipher())->decrypt($encoded, self::KEY);
     }
+
+    // -------------------------------------------------------------------------
+    // Options / associated data
+    // -------------------------------------------------------------------------
+
+    public function aeadCipherProvider(): array
+    {
+        return [
+            'xchacha20-poly1305' => [new XChaCha20Poly1305Cipher(), XChaCha20Poly1305Cipher::OPTION_AD],
+            'aes-256-gcm'        => [new AesGcmCipher(), AesGcmCipher::OPTION_AD],
+        ];
+    }
+
+    /**
+     * @dataProvider aeadCipherProvider
+     */
+    public function testAdRoundtrip(CipherInterface $cipher, string $adKey): void
+    {
+        $encoded = $cipher->encrypt('plain value', self::KEY, [$adKey => 'vault.secret']);
+
+        $this->assertSame('plain value', $cipher->decrypt($encoded, self::KEY, [$adKey => 'vault.secret']));
+    }
+
+    /**
+     * @dataProvider aeadCipherProvider
+     */
+    public function testWrongAdIsRejected(CipherInterface $cipher, string $adKey): void
+    {
+        $encoded = $cipher->encrypt('plain value', self::KEY, [$adKey => 'vault.secret']);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('authentication tag mismatch');
+        $cipher->decrypt($encoded, self::KEY, [$adKey => 'vault.token']);
+    }
+
+    /**
+     * @dataProvider aeadCipherProvider
+     */
+    public function testMissingAdOnDecryptIsRejected(CipherInterface $cipher, string $adKey): void
+    {
+        $encoded = $cipher->encrypt('plain value', self::KEY, [$adKey => 'vault.secret']);
+
+        $this->expectException(RuntimeException::class);
+        $cipher->decrypt($encoded, self::KEY);
+    }
+
+    /**
+     * @dataProvider aeadCipherProvider
+     */
+    public function testNonStringAdIsRejected(CipherInterface $cipher, string $adKey): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $cipher->encrypt('plain value', self::KEY, [$adKey => 42]);
+    }
+
+    /**
+     * @dataProvider cipherProvider
+     */
+    public function testUnknownOptionIsRejected(CipherInterface $cipher): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('unknown option');
+        $cipher->encrypt('plain value', self::KEY, ['nope' => 1]);
+    }
+
+    public function testSecretboxRejectsAdAsUnsupported(): void
+    {
+        // Secretbox is not an AEAD: 'ad' must be rejected loudly, never silently dropped.
+        $this->expectException(\InvalidArgumentException::class);
+        (new SodiumSecretboxCipher())->encrypt('plain value', self::KEY, ['ad' => 'vault.secret']);
+    }
 }

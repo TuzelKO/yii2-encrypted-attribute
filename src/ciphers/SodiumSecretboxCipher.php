@@ -7,12 +7,16 @@ use RuntimeException;
 /**
  * XSalsa20-Poly1305 authenticated encryption via sodium_crypto_secretbox.
  *
+ * Supports no per-call options: secretbox predates the AEAD interface and
+ * cannot bind associated data — pick XChaCha20Poly1305Cipher or AesGcmCipher
+ * when context binding is needed.
+ *
  * Stored format: base64(nonce || ciphertext), SODIUM_BASE64_VARIANT_ORIGINAL.
  * Key: 32 raw bytes (SodiumSecretboxKey in tuzelko/yii2-key-storage).
  *
  * Requires ext-sodium.
  */
-class SodiumSecretboxCipher implements CipherInterface
+class SodiumSecretboxCipher extends AbstractCipher
 {
     public function __construct()
     {
@@ -24,8 +28,10 @@ class SodiumSecretboxCipher implements CipherInterface
     /**
      * @throws \SodiumException
      */
-    public function encrypt(string $plaintext, string $key): string
+    public function encrypt(string $plaintext, string $key, array $options = []): string
     {
+        $this->validateOptions($options);
+
         $nonce      = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
         $ciphertext = sodium_crypto_secretbox($plaintext, $nonce, $key);
 
@@ -35,8 +41,10 @@ class SodiumSecretboxCipher implements CipherInterface
     /**
      * @throws \SodiumException
      */
-    public function decrypt(string $encoded, string $key): string
+    public function decrypt(string $encoded, string $key, array $options = []): string
     {
+        $this->validateOptions($options);
+
         $blob = sodium_base642bin($encoded, SODIUM_BASE64_VARIANT_ORIGINAL);
 
         if (strlen($blob) <= SODIUM_CRYPTO_SECRETBOX_NONCEBYTES) {

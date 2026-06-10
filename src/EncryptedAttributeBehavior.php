@@ -3,7 +3,6 @@
 namespace tuzelko\yii\encryptedattribute;
 
 use tuzelko\yii\encryptedattribute\ciphers\CipherInterface;
-use tuzelko\yii\encryptedattribute\ciphers\SodiumSecretboxCipher;
 use tuzelko\yii\keystorage\KeyProviderInterface;
 use Yii;
 use yii\base\Behavior;
@@ -27,7 +26,13 @@ use yii\db\ActiveRecord;
  *       'class'      => EncryptedAttributeBehavior::class,
  *       'keyName'    => 'appCrypto',
  *       'attributes' => ['secret_column'],
- *       'cipher'     => SodiumSecretboxCipher::class,
+ *       'cipher'     => SomeCipher::class,             // any CipherInterface implementation
+ *       // Per-call cipher options, keyed by the chosen cipher's OPTION_* constants.
+ *       // Closures are resolved per operation with ($owner, $attribute):
+ *       'cipherOptions' => [
+ *           SomeCipher::OPTION_FOO => static fn ($owner, string $attribute): string
+ *               => $owner::tableName() . '.' . $attribute,
+ *       ],
  *   ]
  *
  * The raw key is resolved lazily from the KeyProviderInterface registered in the DI container
@@ -52,6 +57,18 @@ class EncryptedAttributeBehavior extends Behavior
      * @var CipherInterface|class-string<CipherInterface>|null
      */
     public $cipher = null;
+
+    /**
+     * Per-call cipher options, keyed by the configured cipher's OPTION_* constants.
+     * A Closure value is resolved on every operation with ($owner, $attribute) —
+     * use it for context-dependent values such as associated data. The same
+     * resolved options must reproduce on decrypt (don't bind to mutable state).
+     *
+     * The behavior passes options through as-is; validation is the cipher's job.
+     *
+     * @var array<string, mixed>
+     */
+    public array $cipherOptions = [];
 
     private ?CipherInterface $cipherInstance = null;
 
@@ -125,8 +142,11 @@ class EncryptedAttributeBehavior extends Behavior
     public function __get($name)
     {
         if ($this->isVirtual($name)) {
-            $encrypted = $this->owner->getAttribute($this->physical($name));
-            return $encrypted !== null ? $this->cipher()->decrypt($encrypted, $this->key()) : null;
+            $physical  = $this->physical($name);
+            $encrypted = $this->owner->getAttribute($physical);
+            return $encrypted !== null
+                ? $this->cipher()->decrypt($encrypted, $this->key(), $this->options($physical))
+                : null;
         }
         return parent::__get($name);
     }
@@ -134,13 +154,29 @@ class EncryptedAttributeBehavior extends Behavior
     public function __set($name, $value): void
     {
         if ($this->isVirtual($name)) {
+            $physical = $this->physical($name);
             $this->owner->setAttribute(
-                $this->physical($name),
-                $value !== null ? $this->cipher()->encrypt($value, $this->key()) : null,
+                $physical,
+                $value !== null ? $this->cipher()->encrypt($value, $this->key(), $this->options($physical)) : null,
             );
             return;
         }
         parent::__set($name, $value);
+    }
+
+    /**
+     * Resolves cipherOptions for the given physical attribute: Closure values
+     * are called with ($owner, $attribute), everything else passes through.
+     *
+     * @return array<string, mixed>
+     */
+    private function options(string $attribute): array
+    {
+        $resolved = [];
+        foreach ($this->cipherOptions as $key => $value) {
+            $resolved[$key] = $value instanceof \Closure ? $value($this->owner, $attribute) : $value;
+        }
+        return $resolved;
     }
 
     private function isVirtual(string $name): bool

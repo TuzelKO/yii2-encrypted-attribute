@@ -104,22 +104,23 @@ $integration->api_token_decrypted = null;        // clears the column
 
 ## Configuration
 
-| Property | Type | Default | Description |
-|---|---|---|---|
-| `attributes` | `array` | `[]` | Physical column names to virtualize |
-| `keyName` | `string` | — *(required)* | Key name resolved through `KeyProviderInterface::getRaw()` |
-| `suffix` | `string` | `'_decrypted'` | Suffix of the virtual accessor |
-| `cipher` | `CipherInterface\|class-string` | — *(required)* | Encryption algorithm (see [Ciphers](#ciphers)) |
+| Property        | Type                            | Default        | Description                                                                                                                      |
+|-----------------|---------------------------------|----------------|----------------------------------------------------------------------------------------------------------------------------------|
+| `attributes`    | `array`                         | `[]`           | Physical column names to virtualize                                                                                              |
+| `keyName`       | `string`                        | — *(required)* | Key name resolved through `KeyProviderInterface::getRaw()`                                                                       |
+| `suffix`        | `string`                        | `'_decrypted'` | Suffix of the virtual accessor                                                                                                   |
+| `cipher`        | `CipherInterface\|class-string` | — *(required)* | Encryption algorithm (see [Ciphers](#ciphers))                                                                                   |
+| `cipherOptions` | `array`                         | `[]`           | Per-call cipher options, keyed by the cipher's `OPTION_*` constants (see [Associated data](#associated-data-and-cipher-options)) |
 
 ## Ciphers
 
 There is intentionally **no default cipher** — the algorithm a model uses must be visible in its configuration.
 
-| Cipher | Algorithm | Requires | Key | Stored format |
-|---|---|---|---|---|
-| `SodiumSecretboxCipher` | XSalsa20-Poly1305 | ext-sodium | 32 bytes | `base64(nonce[24] \|\| ciphertext)` |
-| `XChaCha20Poly1305Cipher` | XChaCha20-Poly1305 (IETF) | ext-sodium | 32 bytes | `base64(nonce[24] \|\| ciphertext)` |
-| `AesGcmCipher` | AES-256-GCM | ext-openssl | 32 bytes | `base64(nonce[12] \|\| tag[16] \|\| ciphertext)` |
+| Cipher                    | Algorithm                 | Requires    | Key      | Stored format                                    |
+|---------------------------|---------------------------|-------------|----------|--------------------------------------------------|
+| `SodiumSecretboxCipher`   | XSalsa20-Poly1305         | ext-sodium  | 32 bytes | `base64(nonce[24] \|\| ciphertext)`              |
+| `XChaCha20Poly1305Cipher` | XChaCha20-Poly1305 (IETF) | ext-sodium  | 32 bytes | `base64(nonce[24] \|\| ciphertext)`              |
+| `AesGcmCipher`            | AES-256-GCM               | ext-openssl | 32 bytes | `base64(nonce[12] \|\| tag[16] \|\| ciphertext)` |
 
 All three are authenticated (AEAD) and use a fresh random nonce per write; nonce sizes are collision-safe for random generation. Algorithms with short nonces unsafe for random use (ChaCha20-Poly1305 IETF) or without built-in authentication (AES-CBC) are intentionally not shipped.
 
@@ -136,7 +137,31 @@ use tuzelko\yii\encryptedattribute\ciphers\AesGcmCipher;
 
 The extension check happens lazily, when the cipher is first used — environments without ext-sodium can install the package and use `AesGcmCipher` freely.
 
-A custom algorithm is a class implementing `CipherInterface` (`encrypt`/`decrypt`, authenticated encryption with a fresh random nonce per call).
+A custom algorithm is a class implementing `CipherInterface` (`encrypt`/`decrypt`, authenticated encryption with a fresh random nonce per call). Extend `AbstractCipher` to get strict option validation for free.
+
+## Associated data and cipher options
+
+Each cipher declares the per-call options it understands as its own `OPTION_*` class constants; unknown options are rejected with an exception, never silently ignored. The AEAD ciphers (`XChaCha20Poly1305Cipher`, `AesGcmCipher`) support **associated data** — authenticated but unencrypted context the ciphertext is cryptographically bound to. `SodiumSecretboxCipher` predates the AEAD interface and supports no options.
+
+Binding a value to its column prevents transplanting ciphertext between columns or tables (an attacker with DB write access cannot swap one valid encrypted value for another):
+
+```php
+use tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher;
+
+[
+    'class'      => EncryptedAttributeBehavior::class,
+    'keyName'    => 'appCrypto',
+    'attributes' => ['api_token'],
+    'cipher'     => XChaCha20Poly1305Cipher::class,
+    'cipherOptions' => [
+        // Closures are resolved per operation with ($owner, $attribute)
+        XChaCha20Poly1305Cipher::OPTION_AD =>
+            static fn ($owner, string $attribute): string => $owner::tableName() . '.' . $attribute,
+    ],
+]
+```
+
+The same options must reproduce on decrypt, so bind only to **immutable** context. Note that encryption happens at assignment time: a generated primary key does not exist yet on a new record, so include the PK in the AD only if your application sets it before assigning the encrypted value (e.g. client-generated UUIDs).
 
 > **Note:** the stored value does not identify the cipher that produced it. The cipher choice is deliberately explicit configuration, never auto-detected from the environment — otherwise the same model could silently encrypt differently on different hosts. Switching ciphers requires re-encrypting existing rows (same procedure as [key rotation](#key-rotation)).
 
@@ -164,11 +189,12 @@ The behavior intentionally has no multi-key fallback. To rotate a key: add the n
 
 ## Error handling
 
-| Condition | Result |
-|---|---|
-| `keyName` or `cipher` not configured | `yii\base\InvalidConfigException` on behavior init |
-| Key unknown / malformed / wrong length | `tuzelko\yii\keystorage\InvalidKeyException` |
-| Tampered or corrupted ciphertext | `RuntimeException` (authentication tag mismatch) |
+| Condition                                                      | Result                                             |
+|----------------------------------------------------------------|----------------------------------------------------|
+| `keyName` or `cipher` not configured                           | `yii\base\InvalidConfigException` on behavior init |
+| Key unknown / malformed / wrong length                         | `tuzelko\yii\keystorage\InvalidKeyException`       |
+| Tampered or corrupted ciphertext, wrong key or associated data | `RuntimeException` (authentication tag mismatch)   |
+| Unknown / unsupported / invalid cipher option                  | `InvalidArgumentException`                         |
 
 ## Running tests
 

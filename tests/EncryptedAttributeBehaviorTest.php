@@ -239,6 +239,42 @@ class EncryptedAttributeBehaviorTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
+    // Cipher options
+    // -------------------------------------------------------------------------
+
+    public function testCipherOptionsClosureBindsContext(): void
+    {
+        $attachAd = static function (Vault $model): void {
+            $model->detachBehavior('encryption');
+            $model->attachBehavior('encryption', [
+                'class'      => EncryptedAttributeBehavior::class,
+                'keyName'    => 'main',
+                'attributes' => ['secret', 'token'],
+                'cipher'     => \tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher::class,
+                'cipherOptions' => [
+                    \tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher::OPTION_AD =>
+                        static fn (Vault $owner, string $attribute): string => $owner::tableName() . '.' . $attribute,
+                ],
+            ]);
+        };
+
+        $model = new Vault();
+        $attachAd($model);
+        $model->secret_decrypted = 'bound to vault.secret';
+        $this->assertTrue($model->save());
+
+        $reloaded = Vault::findOne($model->id);
+        $attachAd($reloaded);
+        $this->assertSame('bound to vault.secret', $reloaded->secret_decrypted);
+
+        // Transplanting the ciphertext into another AD context must fail.
+        $reloaded->token = $reloaded->secret;
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('authentication tag mismatch');
+        $reloaded->token_decrypted;
+    }
+
+    // -------------------------------------------------------------------------
     // Custom suffix
     // -------------------------------------------------------------------------
 

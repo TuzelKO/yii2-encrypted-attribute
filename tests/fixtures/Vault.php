@@ -22,6 +22,14 @@ class Vault extends ActiveRecord
         return 'vault';
     }
 
+    /**
+     * AD context for cipherOptionMethods-based tests.
+     */
+    public function encryptionContext(string $attribute): string
+    {
+        return self::tableName() . '.' . $attribute;
+    }
+
     public function behaviors(): array
     {
         return [

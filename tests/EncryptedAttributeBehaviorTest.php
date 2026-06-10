@@ -242,29 +242,29 @@ class EncryptedAttributeBehaviorTest extends TestCase
     // Cipher options
     // -------------------------------------------------------------------------
 
-    public function testCipherOptionsClosureBindsContext(): void
+    private function attachAdBehavior(Vault $model): void
     {
-        $attachAd = static function (Vault $model): void {
-            $model->detachBehavior('encryption');
-            $model->attachBehavior('encryption', [
-                'class'      => EncryptedAttributeBehavior::class,
-                'keyName'    => 'main',
-                'attributes' => ['secret', 'token'],
-                'cipher'     => \tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher::class,
-                'cipherOptions' => [
-                    \tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher::OPTION_AD =>
-                        static fn (Vault $owner, string $attribute): string => $owner::tableName() . '.' . $attribute,
-                ],
-            ]);
-        };
+        $model->detachBehavior('encryption');
+        $model->attachBehavior('encryption', [
+            'class'      => EncryptedAttributeBehavior::class,
+            'keyName'    => 'main',
+            'attributes' => ['secret', 'token'],
+            'cipher'     => \tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher::class,
+            'cipherOptionMethods' => [
+                \tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher::OPTION_AD => 'encryptionContext',
+            ],
+        ]);
+    }
 
+    public function testCipherOptionMethodBindsContext(): void
+    {
         $model = new Vault();
-        $attachAd($model);
+        $this->attachAdBehavior($model);
         $model->secret_decrypted = 'bound to vault.secret';
         $this->assertTrue($model->save());
 
         $reloaded = Vault::findOne($model->id);
-        $attachAd($reloaded);
+        $this->attachAdBehavior($reloaded);
         $this->assertSame('bound to vault.secret', $reloaded->secret_decrypted);
 
         // Transplanting the ciphertext into another AD context must fail.
@@ -272,6 +272,56 @@ class EncryptedAttributeBehaviorTest extends TestCase
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('authentication tag mismatch');
         $reloaded->token_decrypted;
+    }
+
+    public function testModelWithCipherOptionMethodsIsSerializable(): void
+    {
+        // The very reason method names exist instead of closures: a cached
+        // owner (serialize($model)) must survive with dynamic options configured.
+        $model = new Vault();
+        $this->attachAdBehavior($model);
+        $model->secret_decrypted = 'cache me';
+
+        $restored = unserialize(serialize($model));
+
+        $this->assertSame('cache me', $restored->secret_decrypted);
+    }
+
+    public function testClosureInCipherOptionsIsRejectedOnInit(): void
+    {
+        $model = new Vault();
+        $model->detachBehavior('encryption');
+
+        $this->expectException(InvalidConfigException::class);
+        $this->expectExceptionMessage('not serializable');
+        $model->attachBehavior('encryption', [
+            'class'      => EncryptedAttributeBehavior::class,
+            'keyName'    => 'main',
+            'attributes' => ['secret'],
+            'cipher'     => \tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher::class,
+            'cipherOptions' => [
+                \tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher::OPTION_AD => static fn () => 'x',
+            ],
+        ]);
+    }
+
+    public function testMissingOwnerMethodIsRejected(): void
+    {
+        $model = new Vault();
+        $model->detachBehavior('encryption');
+        $model->attachBehavior('encryption', [
+            'class'      => EncryptedAttributeBehavior::class,
+            'keyName'    => 'main',
+            'attributes' => ['secret'],
+            'cipher'     => \tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher::class,
+            'cipherOptionMethods' => [
+                \tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher::OPTION_AD => 'noSuchMethod',
+            ],
+        ]);
+
+        $this->expectException(InvalidConfigException::class);
+        $this->expectExceptionMessage('noSuchMethod');
+        $model->secret_decrypted = 'boom';
     }
 
     // -------------------------------------------------------------------------

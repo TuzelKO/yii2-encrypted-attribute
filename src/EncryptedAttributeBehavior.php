@@ -27,12 +27,10 @@ use yii\db\ActiveRecord;
  *       'keyName'    => 'appCrypto',
  *       'attributes' => ['secret_column'],
  *       'cipher'     => SomeCipher::class,             // any CipherInterface implementation
- *       // Per-call cipher options, keyed by the chosen cipher's OPTION_* constants.
- *       // Closures are resolved per operation with ($owner, $attribute):
- *       'cipherOptions' => [
- *           SomeCipher::OPTION_FOO => static fn ($owner, string $attribute): string
- *               => $owner::tableName() . '.' . $attribute,
- *       ],
+ *       // Per-call cipher options, keyed by the chosen cipher's OPTION_* constants:
+ *       'cipherOptions'       => [SomeCipher::OPTION_FOO => 'literal value'],
+ *       // ...or resolved per operation by an owner method (see $cipherOptionMethods):
+ *       'cipherOptionMethods' => [SomeCipher::OPTION_FOO => 'encryptionContext'],
  *   ]
  *
  * The raw key is resolved lazily from the KeyProviderInterface registered in the DI container
@@ -59,16 +57,35 @@ class EncryptedAttributeBehavior extends Behavior
     public $cipher = null;
 
     /**
-     * Per-call cipher options, keyed by the configured cipher's OPTION_* constants.
-     * A Closure value is resolved on every operation with ($owner, $attribute) —
-     * use it for context-dependent values such as associated data. The same
-     * resolved options must reproduce on decrypt (don't bind to mutable state).
+     * Static per-call cipher options, keyed by the configured cipher's OPTION_*
+     * constants. Values pass through as-is — validation is the cipher's job.
      *
-     * The behavior passes options through as-is; validation is the cipher's job.
+     * Closures are rejected: behaviors are serialized together with their owner
+     * (e.g. when the model is cached), and closures are not serializable. For
+     * dynamic values use $cipherOptionMethods.
      *
      * @var array<string, mixed>
      */
     public array $cipherOptions = [];
+
+    /**
+     * Dynamic per-call cipher options: option key => owner method name. The
+     * method is called on every operation with the physical attribute name and
+     * its return value is used as the option (overriding $cipherOptions on the
+     * same key) — use it for context-dependent values such as associated data:
+     *
+     *     'cipherOptionMethods' => [SomeCipher::OPTION_FOO => 'encryptionContext'],
+     *
+     *     // on the owner model:
+     *     public function encryptionContext(string $attribute): string { ... }
+     *
+     * The same resolved values must reproduce on decrypt — derive them only
+     * from immutable context. Method names are plain strings, so the owner
+     * stays serializable.
+     *
+     * @var array<string, string>
+     */
+    public array $cipherOptionMethods = [];
 
     private ?CipherInterface $cipherInstance = null;
 
@@ -90,6 +107,23 @@ class EncryptedAttributeBehavior extends Behavior
             throw new InvalidConfigException(
                 self::class . ': $cipher must be set to a ' . CipherInterface::class . ' instance or class name.'
             );
+        }
+
+        foreach ($this->cipherOptions as $key => $value) {
+            if ($value instanceof \Closure) {
+                throw new InvalidConfigException(
+                    self::class . ": cipher option \"$key\" is a Closure; closures are not serializable and would"
+                    . ' break caching of the owner model. Use $cipherOptionMethods for dynamic values.'
+                );
+            }
+        }
+
+        foreach ($this->cipherOptionMethods as $key => $method) {
+            if (!is_string($method)) {
+                throw new InvalidConfigException(
+                    self::class . ": \$cipherOptionMethods[\"$key\"] must be an owner method name (string)."
+                );
+            }
         }
     }
 
@@ -165,17 +199,26 @@ class EncryptedAttributeBehavior extends Behavior
     }
 
     /**
-     * Resolves cipherOptions for the given physical attribute: Closure values
-     * are called with ($owner, $attribute), everything else passes through.
+     * Builds cipher options for the given physical attribute: static values
+     * from $cipherOptions, then dynamic ones — owner methods named in
+     * $cipherOptionMethods, each called with the attribute name.
      *
      * @return array<string, mixed>
+     * @throws InvalidConfigException when a configured owner method does not exist.
      */
     private function options(string $attribute): array
     {
-        $resolved = [];
-        foreach ($this->cipherOptions as $key => $value) {
-            $resolved[$key] = $value instanceof \Closure ? $value($this->owner, $attribute) : $value;
+        $resolved = $this->cipherOptions;
+
+        foreach ($this->cipherOptionMethods as $key => $method) {
+            if (!$this->owner->hasMethod($method)) {
+                throw new InvalidConfigException(
+                    self::class . ": owner method \"$method\" configured for cipher option \"$key\" does not exist."
+                );
+            }
+            $resolved[$key] = $this->owner->{$method}($attribute);
         }
+
         return $resolved;
     }
 

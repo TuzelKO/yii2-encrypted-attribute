@@ -104,13 +104,14 @@ $integration->api_token_decrypted = null;        // clears the column
 
 ## Configuration
 
-| Property        | Type                            | Default        | Description                                                                                                                      |
-|-----------------|---------------------------------|----------------|----------------------------------------------------------------------------------------------------------------------------------|
-| `attributes`    | `array`                         | `[]`           | Physical column names to virtualize                                                                                              |
-| `keyName`       | `string`                        | — *(required)* | Key name resolved through `KeyProviderInterface::getRaw()`                                                                       |
-| `suffix`        | `string`                        | `'_decrypted'` | Suffix of the virtual accessor                                                                                                   |
-| `cipher`        | `CipherInterface\|class-string` | — *(required)* | Encryption algorithm (see [Ciphers](#ciphers))                                                                                   |
-| `cipherOptions` | `array`                         | `[]`           | Per-call cipher options, keyed by the cipher's `OPTION_*` constants (see [Associated data](#associated-data-and-cipher-options)) |
+| Property              | Type                            | Default        | Description                                                                                                                             |
+|-----------------------|---------------------------------|----------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `attributes`          | `array`                         | `[]`           | Physical column names to virtualize                                                                                                     |
+| `keyName`             | `string`                        | — *(required)* | Key name resolved through `KeyProviderInterface::getRaw()`                                                                              |
+| `suffix`              | `string`                        | `'_decrypted'` | Suffix of the virtual accessor                                                                                                          |
+| `cipher`              | `CipherInterface\|class-string` | — *(required)* | Encryption algorithm (see [Ciphers](#ciphers))                                                                                          |
+| `cipherOptions`       | `array`                         | `[]`           | Static per-call cipher options, keyed by the cipher's `OPTION_*` constants (see [Associated data](#associated-data-and-cipher-options)) |
+| `cipherOptionMethods` | `array`                         | `[]`           | Dynamic per-call cipher options: option key => owner method name, called with the attribute name per operation                          |
 
 ## Ciphers
 
@@ -143,25 +144,40 @@ A custom algorithm is a class implementing `CipherInterface` (`encrypt`/`decrypt
 
 Each cipher declares the per-call options it understands as its own `OPTION_*` class constants; unknown options are rejected with an exception, never silently ignored. The AEAD ciphers (`XChaCha20Poly1305Cipher`, `AesGcmCipher`) support **associated data** — authenticated but unencrypted context the ciphertext is cryptographically bound to. `SodiumSecretboxCipher` predates the AEAD interface and supports no options.
 
-Binding a value to its column prevents transplanting ciphertext between columns or tables (an attacker with DB write access cannot swap one valid encrypted value for another):
+Binding a value to its column prevents transplanting ciphertext between columns or tables (an attacker with DB write access cannot swap one valid encrypted value for another).
+
+Options come in two flavors: static literals in `cipherOptions`, and dynamic values in `cipherOptionMethods` — owner method names (validator-style), called on every operation with the physical attribute name:
 
 ```php
 use tuzelko\yii\encryptedattribute\ciphers\XChaCha20Poly1305Cipher;
 
-[
-    'class'      => EncryptedAttributeBehavior::class,
-    'keyName'    => 'appCrypto',
-    'attributes' => ['api_token'],
-    'cipher'     => XChaCha20Poly1305Cipher::class,
-    'cipherOptions' => [
-        // Closures are resolved per operation with ($owner, $attribute)
-        XChaCha20Poly1305Cipher::OPTION_AD =>
-            static fn ($owner, string $attribute): string => $owner::tableName() . '.' . $attribute,
-    ],
-]
+public function behaviors(): array
+{
+    return [
+        [
+            'class'      => EncryptedAttributeBehavior::class,
+            'keyName'    => 'appCrypto',
+            'attributes' => ['api_token'],
+            'cipher'     => XChaCha20Poly1305Cipher::class,
+            'cipherOptionMethods' => [
+                XChaCha20Poly1305Cipher::OPTION_AD => 'encryptionContext',
+            ],
+        ],
+    ];
+}
+
+public function encryptionContext(string $attribute): string
+{
+    return self::tableName() . '.' . $attribute;
+}
 ```
 
-The same options must reproduce on decrypt, so bind only to **immutable** context. Note that encryption happens at assignment time: a generated primary key does not exist yet on a new record, so include the PK in the AD only if your application sets it before assigning the encrypted value (e.g. client-generated UUIDs).
+**Closures are deliberately not supported** (rejected at init): behaviors are serialized together with their owner, so a Closure in the configuration would make the model uncacheable — `serialize($model)` throws. Method names are plain strings and keep the owner fully serializable.
+
+The same options must reproduce on decrypt, so derive them only from **immutable** context:
+
+- Encryption happens at assignment time: a generated primary key does not exist yet on a new record. Include the PK in the AD only if your application sets it before assigning the encrypted value (e.g. client-generated UUIDs).
+- AD cannot be retrofitted: values encrypted without AD decrypt only without AD (and vice versa). Adding or changing AD on a column with existing data requires re-encrypting the rows — the same procedure as [key rotation](#key-rotation). Decide on AD before the first real data lands in the column.
 
 > **Note:** the stored value does not identify the cipher that produced it. The cipher choice is deliberately explicit configuration, never auto-detected from the environment — otherwise the same model could silently encrypt differently on different hosts. Switching ciphers requires re-encrypting existing rows (same procedure as [key rotation](#key-rotation)).
 
